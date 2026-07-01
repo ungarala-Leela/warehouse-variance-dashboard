@@ -41,12 +41,23 @@ def strip_col_names(df: pl.DataFrame) -> pl.DataFrame:
     return df.rename({c: c.strip() for c in df.columns if c != c.strip()})
 
 
-def read_any_file(path):
+MAIN_NEEDED_COLS = [
+    "full_date", "variance_warehouse_id", "variance_reason_type",
+    "variance_quantity", "VALUE", "product_detail_fsn", "variance_id"
+]
+
+
+def read_any_file(path, select_cols=None):
     if path.lower().endswith((".xlsx", ".xls")):
         return pl.read_excel(path)
-    # Use lazy scan for large CSVs to reduce peak memory usage
     try:
-        return pl.scan_csv(path, low_memory=True).collect()
+        lf = pl.scan_csv(path, low_memory=True, ignore_errors=True)
+        if select_cols:
+            available = list(lf.schema)
+            cols = [c for c in select_cols if c in available]
+            if cols:
+                lf = lf.select(cols)
+        return lf.collect()
     except Exception:
         return pl.read_csv(path, low_memory=True)
 
@@ -110,7 +121,7 @@ if not MAIN_PATH:
 # ---------- data engine ----------
 @st.cache_data(show_spinner=True)
 def load_and_merge_data(main_path, hub_path, fsn_path):
-    main_df = read_any_file(main_path)
+    main_df = read_any_file(main_path, select_cols=MAIN_NEEDED_COLS)
     main_df = strip_col_names(main_df)
 
     expected = {"variance_warehouse_id", "variance_quantity"}
