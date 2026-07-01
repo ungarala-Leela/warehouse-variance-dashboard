@@ -2,30 +2,49 @@ import streamlit as st
 import polars as pl
 import os
 import glob
+import requests
 
 st.set_page_config(page_title="Warehouse Variance Dashboard", layout="wide")
 st.title("📊 Warehouse Variance & FSN Performance Dashboard")
 st.markdown("---")
 
-# --- 1. DIRECTORY CONFIGURATION ---
-# This script expects to live in the SAME folder as the 3 data files.
-FOLDER_PATH = os.path.dirname(os.path.abspath(__file__))
-
 PREFIX_LEN = 7  # number of leading characters used to match warehouse/site IDs
+
+# --- 1. DATA SOURCES ---
+# Small files (Hub Map, FSN Mapping) stay bundled in the repo's "data/" folder.
+# The big variance file (too large for a normal repo commit) is hosted as a
+# GitHub Release asset and downloaded at runtime from a stable "latest" URL.
+DATA_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+# >>> EDIT THESE TWO LINES to match your repo + release asset filename <<<
+GITHUB_REPO = "ungarala-Leela/warehouse-variance-dashboard"
+MAIN_FILE_ASSET_NAME = "variance.csv"  # exact filename you attached to the Release
+
+MAIN_FILE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest/download/{MAIN_FILE_ASSET_NAME}"
+LOCAL_CACHE_PATH = os.path.join("/tmp", MAIN_FILE_ASSET_NAME)
+
+
+@st.cache_data(show_spinner="Downloading latest data file from GitHub Release...")
+def download_main_file(url: str, cache_buster: str = "") -> str:
+    """Downloads the file once per cache_buster value and returns the local path."""
+    response = requests.get(url, timeout=120)
+    response.raise_for_status()
+    with open(LOCAL_CACHE_PATH, "wb") as f:
+        f.write(response.content)
+    return LOCAL_CACHE_PATH
 
 
 def list_data_files(folder):
-    """All csv/xlsx/xls files in the folder, excluding temp/lock files."""
+    if not os.path.exists(folder):
+        return []
     patterns = ["*.csv", "*.xlsx", "*.xls"]
     files = []
     for p in patterns:
         files.extend(glob.glob(os.path.join(folder, p)))
-    files = [f for f in files if os.path.isfile(f) and not os.path.basename(f).startswith("~$")]
-    return files
+    return [f for f in files if os.path.isfile(f) and not os.path.basename(f).startswith("~$")]
 
 
 def find_by_keyword(files, keywords):
-    """Return the first file whose name contains any of the given keywords (case-insensitive)."""
     for f in files:
         name = os.path.basename(f).lower()
         if any(kw in name for kw in keywords):
@@ -33,14 +52,31 @@ def find_by_keyword(files, keywords):
     return None
 
 
-all_files = list_data_files(FOLDER_PATH)
+all_files = list_data_files(DATA_FOLDER)
+HUB_PATH = find_by_keyword(all_files, ["hub"])
+FSN_PATH = find_by_keyword(all_files, ["fsn"])
 
-HUB_MAP = find_by_keyword(all_files, ["hub"])
-FSN_MAP = find_by_keyword(all_files, ["fsn"])
+with st.sidebar:
+    st.header("📁 Data Source")
+    cache_buster = st.text_input(
+        "Data version tag (change this after publishing a new Release to force a re-download)",
+        value="v1",
+    )
+    try:
+        MAIN_PATH = download_main_file(MAIN_FILE_URL, cache_buster)
+        st.success(f"Main file: downloaded ({MAIN_FILE_ASSET_NAME})")
+    except Exception as download_err:
+        MAIN_PATH = None
+        st.error(f"❌ Could not download main file: {download_err}")
 
-# Main file = whatever is left over after excluding hub/fsn files
-remaining = [f for f in all_files if f not in {HUB_MAP, FSN_MAP}]
-MAIN_FILE = remaining[0] if remaining else None
+    if HUB_PATH:
+        st.success(f"Hub file: {os.path.basename(HUB_PATH)}")
+    if FSN_PATH:
+        st.success(f"FSN file: {os.path.basename(FSN_PATH)}")
+    if st.button("🔄 Refresh data (clear cache)"):
+        st.cache_data.clear()
+        st.rerun()
+    st.markdown("---")
 
 
 def strip_col_names(df: pl.DataFrame) -> pl.DataFrame:
@@ -207,30 +243,22 @@ def load_and_merge_data(main_path, hub_path, fsn_path):
 
 
 # --- 3. INGESTION ---
-if not MAIN_FILE:
+if not MAIN_PATH:
     st.error(
-        f"❌ Could not find the main variance file inside `{FOLDER_PATH}`.\n\n"
-        f"Files found: {[os.path.basename(f) for f in all_files]}"
+        "❌ Could not download the main variance file.\n\n"
+        f"Check that `{MAIN_FILE_URL}` points to a real, published GitHub Release asset."
     )
     st.stop()
 
-if "dataset" not in st.session_state:
-    st.session_state["dataset"] = None
+with st.spinner("Processing files and structural joins..."):
+    try:
+        df = load_and_merge_data(MAIN_PATH, HUB_PATH, FSN_PATH)
+    except Exception as runtime_err:
+        st.error(f"🚨 Core engine load crash: {runtime_err}")
+        st.stop()
 
-if st.session_state["dataset"] is None:
-    with st.spinner("Processing files and structural joins... (happens once)"):
-        try:
-            st.session_state["dataset"] = load_and_merge_data(MAIN_FILE, HUB_MAP, FSN_MAP)
-        except Exception as runtime_err:
-            st.error(f"🚨 Core engine load crash: {runtime_err}")
-            st.stop()
-
-df = st.session_state.get("dataset")
 if df is None:
-    st.error(
-        "❌ Dataset failed to load.\n\n"
-        "Make sure you launched this with `streamlit run app1.py` (not `python app1.py`)."
-    )
+    st.error("❌ Dataset failed to load. Check the data files and try again.")
     st.stop()
 
 # --- 4. SIDEBAR FILTERS ---
