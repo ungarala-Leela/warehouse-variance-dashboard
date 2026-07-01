@@ -44,7 +44,11 @@ def strip_col_names(df: pl.DataFrame) -> pl.DataFrame:
 def read_any_file(path):
     if path.lower().endswith((".xlsx", ".xls")):
         return pl.read_excel(path)
-    return pl.read_csv(path)
+    # Use lazy scan for large CSVs to reduce peak memory usage
+    try:
+        return pl.scan_csv(path, low_memory=True).collect()
+    except Exception:
+        return pl.read_csv(path, low_memory=True)
 
 
 def add_prefix(df: pl.DataFrame, col: str, alias: str) -> pl.DataFrame:
@@ -157,7 +161,7 @@ def load_and_merge_data(main_path, hub_path, fsn_path):
                     .select(["match_key"] + [c for c in metadata_cols if c in df_hub.columns])
 
             if lookup_wh is not None:
-                main_df = main_df.join(lookup_wh, on="match_key", how="left")
+                main_df = main_df.join(lookup_wh, on="match_key", how="left", coalesce=True)
             else:
                 for c in metadata_cols:
                     main_df = main_df.with_columns(pl.lit(None).cast(pl.String).alias(c))
@@ -167,7 +171,7 @@ def load_and_merge_data(main_path, hub_path, fsn_path):
                 matched = main_df.filter(pl.col("Zone").is_not_null())
                 if missing.height > 0:
                     drop_cols = [c for c in metadata_cols if c in missing.columns]
-                    missing = missing.drop(drop_cols).join(lookup_site, on="match_key", how="left")
+                    missing = missing.drop(drop_cols).join(lookup_site, on="match_key", how="left", coalesce=True)
                     main_df = pl.concat([matched, missing], how="diagonal_relaxed")
         except Exception as e:
             st.warning(f"⚠️ Hub mapping failed: {e}")
@@ -193,7 +197,7 @@ def load_and_merge_data(main_path, hub_path, fsn_path):
                     pl.col(cost_col[0]).cast(pl.String).str.replace_all(",", "")
                       .str.strip_chars().cast(pl.Float64, strict=False).alias("cost_pu"),
                 ]).unique(["product_detail_fsn"])
-                main_df = main_df.join(df_fsn, on="product_detail_fsn", how="left")
+                main_df = main_df.join(df_fsn, on="product_detail_fsn", how="left", coalesce=True)
         except Exception as e:
             st.warning(f"⚠️ FSN mapping failed: {e}")
 
